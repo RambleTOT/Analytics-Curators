@@ -31,6 +31,25 @@ type PostRecord = {
 const WEEKDAYS = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
+// Бакеты пауз между постами (в часах)
+const GAP_BUCKETS = [
+  { id: "<6", label: "< 6 часов", min: 0, max: 6 },
+  { id: "6-12", label: "6–12 часов", min: 6, max: 12 },
+  { id: "12-24", label: "12–24 часа", min: 12, max: 24 },
+  { id: "24-48", label: "24–48 часов", min: 24, max: 48 },
+  { id: ">48", label: "> 48 часов", min: 48, max: Infinity },
+];
+
+// Сегменты времени суток
+const TIME_SEGMENTS = [
+  { id: "night", label: "00–06 (ночь)", minHour: 0, maxHour: 6 },
+  { id: "morning", label: "06–10 (утро)", minHour: 6, maxHour: 10 },
+  { id: "day", label: "10–17 (день)", minHour: 10, maxHour: 17 },
+  { id: "evening", label: "17–22 (вечер)", minHour: 17, maxHour: 22 },
+  { id: "late", label: "22–24 (поздний вечер)", minHour: 22, maxHour: 24 },
+];
+
+/** Парсинг даты из Excel/CSV */
 function parseDate(value: any): Date | null {
   if (!value) return null;
 
@@ -48,7 +67,7 @@ function parseDate(value: any): Date | null {
     );
   }
 
-  // Если это уже объект Date (из xlsx)
+  // Если уже Date
   if (value instanceof Date) {
     return value;
   }
@@ -62,52 +81,60 @@ function parseDate(value: any): Date | null {
 /**
  * Маппинг строки Excel → внутренняя структура
  *
- * ⚠️ Здесь можно подправить названия колонок под свою таблицу.
- * Сейчас ожидается:
+ * Ожидаемые названия колонок:
  * - "Дата"
- * - "Просмотры"
- * - "Реакции"
- * - "Тип"
- * - "ER" (если нет — посчитаем Реакции / Просмотры)
+ * - "Время поста"
+ * - "Количество просмотров в день поста"
+ * - "Количество просмотров общее" (как запасной вариант)
+ * - "Количество реакций"
+ * - "Тип поста"
+ * - "ER (Engagement Rate)" — в процентах
  */
 function mapRowToPost(row: any, index: number): PostRecord | null {
-  // ✅ ТВОИ реальные названия колонок из Excel:
   const rawDate = row["Дата"];
-  const rawTime = row["Время поста"]; // строка вида "14:42:00"
+  const rawTime = row["Время поста"]; // строка "14:32:00" или excel-time число
+
   const viewsRaw =
     row["Количество просмотров в день поста"] ??
     row["Количество просмотров общее"];
+
   const reactionsRaw = row["Количество реакций"];
   const postTypeRaw = row["Тип поста"] ?? "Без типа";
-  const erRaw = row["ER (Engagement Rate)"]; // уже в процентах
+  const erRaw = row["ER (Engagement Rate)"]; // в процентах
 
-  // Дата
   const dateObj = parseDate(rawDate);
   if (!dateObj) return null;
 
-  // Добавляем время поста, если есть
+  // Добавляем время поста к дате
   if (rawTime) {
     try {
-      const timeStr = String(rawTime).trim(); // "14:42:00"
-      const [hStr, mStr, sStr] = timeStr.split(":");
-      const h = Number(hStr) || 0;
-      const m = Number(mStr) || 0;
-      const s = Number(sStr) || 0;
-      dateObj.setHours(h, m, s, 0);
+      if (typeof rawTime === "number") {
+        // Excel-формат времени: дробь от 0 до 1
+        const totalMinutes = Math.round(rawTime * 24 * 60);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        dateObj.setHours(hours, minutes, 0, 0);
+      } else {
+        const timeStr = String(rawTime).trim(); // "14:32:00"
+        const [hStr, mStr = "0", sStr = "0"] = timeStr.split(":");
+        const h = Number(hStr) || 0;
+        const m = Number(mStr) || 0;
+        const s = Number(sStr) || 0;
+        dateObj.setHours(h, m, s, 0);
+      }
     } catch {
-      // если время не распарсилось — просто оставляем дату как есть
+      console.warn("Не удалось разобрать время:", rawTime);
     }
   }
 
-  // Числа
   const views = Number(viewsRaw) || 0;
   const reactions = Number(reactionsRaw) || 0;
 
-  // ER: в файле он уже в процентах, преобразуем к доле 0–1
+  // ER из файла (в процентах) → доля 0–1
   let er: number;
   if (erRaw !== undefined && erRaw !== null && erRaw !== "") {
     const erNum = Number(erRaw);
-    er = isFinite(erNum) ? erNum / 100 : 0; // 120% → 1.2
+    er = isFinite(erNum) ? erNum / 100 : 0;
   } else {
     er = views > 0 ? reactions / views : 0;
   }
@@ -115,7 +142,7 @@ function mapRowToPost(row: any, index: number): PostRecord | null {
   const year = dateObj.getFullYear();
   const month = dateObj.getMonth() + 1;
   const monthKey = `${year}-${month.toString().padStart(2, "0")}`;
-  const weekdayIndex = dateObj.getDay(); // 0–6
+  const weekdayIndex = dateObj.getDay();
   const weekdayLabel = WEEKDAYS[weekdayIndex];
   const hour = dateObj.getHours();
 
@@ -136,7 +163,6 @@ function mapRowToPost(row: any, index: number): PostRecord | null {
     postType: String(postTypeRaw ?? "Без типа"),
   };
 }
-
 
 function formatDateLabel(d: Date): string {
   const dd = d.getDate().toString().padStart(2, "0");
@@ -287,6 +313,98 @@ const App: React.FC = () => {
       }));
   }, [filteredPosts]);
 
+  /** Зависимость от паузы с прошлого поста */
+  const gapStats = useMemo(() => {
+    if (filteredPosts.length < 2) return [];
+
+    const sorted = [...filteredPosts].sort(
+      (a, b) => a.dateObj.getTime() - b.dateObj.getTime()
+    );
+
+    type BucketAgg = {
+      label: string;
+      viewsSum: number;
+      erSum: number;
+      count: number;
+    };
+
+    const map = new Map<string, BucketAgg>();
+    GAP_BUCKETS.forEach((b) =>
+      map.set(b.id, { label: b.label, viewsSum: 0, erSum: 0, count: 0 })
+    );
+
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      const diffMs = cur.dateObj.getTime() - prev.dateObj.getTime();
+      const gapHours = diffMs / (1000 * 60 * 60);
+
+      const bucket =
+        GAP_BUCKETS.find(
+          (b) => gapHours >= b.min && gapHours < b.max
+        ) ?? GAP_BUCKETS[GAP_BUCKETS.length - 1];
+
+      const agg = map.get(bucket.id)!;
+      agg.viewsSum += cur.views;
+      agg.erSum += cur.er;
+      agg.count += 1;
+    }
+
+    return GAP_BUCKETS.map((b) => {
+      const agg = map.get(b.id)!;
+      return {
+        bucketId: b.id,
+        bucketLabel: b.label,
+        avgViews: agg.count ? agg.viewsSum / agg.count : 0,
+        avgErPercent: agg.count ? (agg.erSum / agg.count) * 100 : 0,
+      };
+    });
+  }, [filteredPosts]);
+
+  /** Просмотры и ER по времени суток */
+  const timeOfDayStats = useMemo(() => {
+    if (filteredPosts.length === 0) return [];
+
+    type SegmentAgg = {
+      label: string;
+      viewsSum: number;
+      erSum: number;
+      count: number;
+    };
+
+    const map = new Map<string, SegmentAgg>();
+    TIME_SEGMENTS.forEach((s) =>
+      map.set(s.id, {
+        label: s.label,
+        viewsSum: 0,
+        erSum: 0,
+        count: 0,
+      })
+    );
+
+    filteredPosts.forEach((p) => {
+      const seg =
+        TIME_SEGMENTS.find(
+          (s) => p.hour >= s.minHour && p.hour < s.maxHour
+        ) ?? TIME_SEGMENTS[0];
+
+      const agg = map.get(seg.id)!;
+      agg.viewsSum += p.views;
+      agg.erSum += p.er;
+      agg.count += 1;
+    });
+
+    return TIME_SEGMENTS.map((s) => {
+      const agg = map.get(s.id)!;
+      return {
+        segmentId: s.id,
+        segmentLabel: s.label,
+        avgViews: agg.count ? agg.viewsSum / agg.count : 0,
+        avgErPercent: agg.count ? (agg.erSum / agg.count) * 100 : 0,
+      };
+    });
+  }, [filteredPosts]);
+
   /** Средние просмотры и ER по типам постов */
   const byPostType = useMemo(() => {
     const map = new Map<
@@ -379,7 +497,7 @@ const App: React.FC = () => {
     return `rgb(${r}, ${g}, ${b})`;
   };
 
-  /** 1) Если файл ещё не загружен — показываем только экран загрузки */
+  /** 1) Пока файл не загружен — экран загрузки */
   if (posts.length === 0) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-neutral-50">
@@ -390,12 +508,13 @@ const App: React.FC = () => {
           <p className="text-muted mb-4 text-center">
             Загрузите Excel/CSV с данными постов, чтобы получить аналитику.
           </p>
-          <ul className="text-muted mb-4 list-disc list-inside text-xs">
-            <li><strong>Дата</strong> — дата/время поста</li>
-            <li><strong>Просмотры</strong> — количество просмотров</li>
-            <li><strong>Реакции</strong> — лайки/реакции</li>
-            <li><strong>Тип</strong> — рубрика/тип поста</li>
-            <li><strong>ER</strong> (необязательно) — если нет, считается как Реакции/Просмотры</li>
+          <ul className="text-muted mb-4 list-disc list-inside text-xs space-y-1">
+            <li><strong>Дата</strong> — дата поста</li>
+            <li><strong>Время поста</strong> — время публикации</li>
+            <li><strong>Количество просмотров в день поста</strong></li>
+            <li><strong>Количество реакций</strong></li>
+            <li><strong>Тип поста</strong> — рубрика/формат</li>
+            <li><strong>ER (Engagement Rate)</strong> (необязательно) — в %</li>
           </ul>
           <label className="w-full flex justify-center">
             <span className="btn-accent w-full text-center">
@@ -413,7 +532,7 @@ const App: React.FC = () => {
     );
   }
 
-  /** 2) Если файл загружен — показываем полный дашборд */
+  /** 2) Файл загружен — полный дашборд */
   return (
     <div className="min-h-screen flex flex-col bg-neutral-50">
       {/* Header */}
@@ -653,7 +772,7 @@ const App: React.FC = () => {
                   Изменение количества реакций по времени
                 </h3>
                 <p className="text-muted mb-3">
-                  Как меняется активность реакции (лайки, эмодзи) по датам.
+                  Как меняется активность реакций (лайки, эмодзи) по датам.
                 </p>
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
@@ -823,6 +942,129 @@ const App: React.FC = () => {
                     />
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Зависимость от паузы и времени суток */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Пауза с прошлого поста */}
+              <div className="chart-card">
+                <h3 className="text-sm font-semibold mb-1.5 text-neutral-900">
+                  Зависимость просмотров и ER от времени с предыдущего поста
+                </h3>
+                <p className="text-muted mb-3">
+                  Показывает, как частота публикаций влияет на охваты и вовлечённость.
+                  Пауза считается как время между текущим и прошлым постом.
+                </p>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={gapStats}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis
+                        dataKey="bucketLabel"
+                        tick={{ fontSize: 10 }}
+                        interval={0}
+                      />
+                      <YAxis
+                        yAxisId="left"
+                        tick={{ fontSize: 10 }}
+                        orientation="left"
+                      />
+                      <YAxis
+                        yAxisId="right"
+                        tick={{ fontSize: 10 }}
+                        orientation="right"
+                        tickFormatter={(v) => `${v.toFixed(0)}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#ffffff",
+                          border: "1px solid #e5e7eb",
+                          fontSize: 12,
+                        }}
+                        formatter={(value: any, name: any) => {
+                          if (name === "Средний ER, %") {
+                            return `${(value as number).toFixed(1)}%`;
+                          }
+                          return (value as number).toFixed(0);
+                        }}
+                      />
+                      <Legend />
+                      <Bar
+                        yAxisId="left"
+                        dataKey="avgViews"
+                        name="Средние просмотры"
+                        fill="#8195FF"
+                      />
+                      <Bar
+                        yAxisId="right"
+                        dataKey="avgErPercent"
+                        name="Средний ER, %"
+                        fill="#A8DF09"
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Время суток */}
+              <div className="chart-card">
+                <h3 className="text-sm font-semibold mb-1.5 text-neutral-900">
+                  Просмотры и ER по времени суток
+                </h3>
+                <p className="text-muted mb-3">
+                  Помогает понять, в какие интервалы дня аудитория не только смотрит,
+                  но и активнее реагирует на посты.
+                </p>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={timeOfDayStats}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis
+                        dataKey="segmentLabel"
+                        tick={{ fontSize: 10 }}
+                        interval={0}
+                      />
+                      <YAxis
+                        yAxisId="left"
+                        tick={{ fontSize: 10 }}
+                        orientation="left"
+                      />
+                      <YAxis
+                        yAxisId="right"
+                        tick={{ fontSize: 10 }}
+                        orientation="right"
+                        tickFormatter={(v) => `${v.toFixed(0)}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#ffffff",
+                          border: "1px solid #e5e7eb",
+                          fontSize: 12,
+                        }}
+                        formatter={(value: any, name: any) => {
+                          if (name === "Средний ER, %") {
+                            return `${(value as number).toFixed(1)}%`;
+                          }
+                          return (value as number).toFixed(0);
+                        }}
+                      />
+                      <Legend />
+                      <Bar
+                        yAxisId="left"
+                        dataKey="avgViews"
+                        name="Средние просмотры"
+                        fill="#FF5689"
+                      />
+                      <Bar
+                        yAxisId="right"
+                        dataKey="avgErPercent"
+                        name="Средний ER, %"
+                        fill="#FF56DD"
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
 
